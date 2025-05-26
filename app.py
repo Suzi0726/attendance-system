@@ -1,81 +1,85 @@
-# app.py
-
 import streamlit as st
-from streamlit_js_eval import streamlit_js_eval
 from datetime import datetime
-from geopy.distance import geodesic
+from streamlit_js_eval import streamlit_js_eval
+import math
 import pandas as pd
 import os
 
-# === CONFIG ===
-OFFICE_COORDS = (26.8497, 80.9462)
-PHOTO_FOLDER = "photos"
-os.makedirs(PHOTO_FOLDER, exist_ok=True)
-st.set_page_config(page_title="Attendance", layout="centered")
+# -------------------------------
+# CONFIGURATION
+# -------------------------------
+office_lat = 23.01046725209043
+office_lon = 72.62060184026596
+allowed_distance = 100  # meters
 
-# === GET STAFF ID ===
-query_params = st.experimental_get_query_params()
-staff_id = query_params.get("staff", ["Unknown"])[0]
-
+st.set_page_config(page_title="📍 Staff Attendance", layout="centered")
 st.title("📍 Staff Attendance")
-st.subheader(f"👤 Welcome, {staff_id}")
-st.markdown("### 📡 Detecting your GPS location...")
 
-# === GET LOCATION VIA BROWSER (AUTO)
-location = streamlit_js_eval(js_expressions="navigator.geolocation.getCurrentPosition((pos) => {return [pos.coords.latitude, pos.coords.longitude]})", key="get_location", timeout=30)
+# -------------------------------
+# Get Staff ID from URL
+# -------------------------------
+query_params = st.query_params
+staff_id = query_params.get("staff", "Unknown")
 
-if not location:
+st.markdown(f"👤 **Welcome, `{staff_id}`**")
+
+# -------------------------------
+# Get GPS from browser
+# -------------------------------
+location = streamlit_js_eval(js_expressions="navigator.geolocation.getCurrentPosition((pos) => [pos.coords.latitude, pos.coords.longitude])", key="get_location")
+
+if location is None:
     st.warning("Waiting for GPS location… please allow location access in your browser.")
     st.stop()
 
-try:
-    lat, lon = float(location[0]), float(location[1])
-    user_coords = (lat, lon)
-    distance = geodesic(OFFICE_COORDS, user_coords).meters
+user_lat, user_lon = location
+st.markdown(f"🛰 Your Location: `{user_lat}, {user_lon}`")
 
-    if distance > 100:
-        st.error(f"⛔ You are too far from the office: {int(distance)} meters")
-        st.stop()
-    else:
-        st.success(f"✅ Location Verified: {int(distance)} meters from office")
+# -------------------------------
+# Haversine Formula
+# -------------------------------
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371000  # Radius in meters
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+    a = math.sin(delta_phi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(delta_lambda/2)**2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return R * c
 
-        # === MANDATORY PHOTO ===
-        photo = st.camera_input("📸 Please take a live photo (required)")
+distance = haversine(user_lat, user_lon, office_lat, office_lon)
+st.info(f"📏 Distance from office: `{int(distance)} meters`")
 
-        if not photo:
-            st.warning("⚠️ You must click a live photo to proceed.")
-            st.stop()
+# -------------------------------
+# Attendance Form
+# -------------------------------
+if distance <= allowed_distance:
+    with st.form("attendance_form", clear_on_submit=False):
+        st.success("✅ You are inside the allowed area.")
+        option = st.radio("Select action:", ["Punch In", "Punch Out"])
+        photo = st.camera_input("📸 Take a selfie")
+        submitted = st.form_submit_button("Submit Attendance")
 
-        # === BUTTONS ===
-        col1, col2 = st.columns(2)
-        punch_type = None
+        if submitted:
+            if not photo:
+                st.error("Photo is required for attendance!")
+            else:
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                data = {
+                    "Staff ID": staff_id,
+                    "Action": option,
+                    "Time": timestamp,
+                    "Latitude": user_lat,
+                    "Longitude": user_lon
+                }
+                df = pd.DataFrame([data])
 
-        if col1.button("📥 Punch In"):
-            punch_type = "Punch In"
-        elif col2.button("📤 Punch Out"):
-            punch_type = "Punch Out"
+                if os.path.exists("attendance_log.csv"):
+                    df.to_csv("attendance_log.csv", mode="a", header=False, index=False)
+                else:
+                    df.to_csv("attendance_log.csv", index=False)
 
-        if punch_type:
-            now = datetime.now()
-            timestamp = now.strftime("%Y-%m-%d_%H-%M-%S")
-            photo_filename = f"{PHOTO_FOLDER}/{staff_id}_{timestamp}_{punch_type.replace(' ', '')}.jpg"
-            with open(photo_filename, "wb") as f:
-                f.write(photo.getbuffer())
-
-            record = {
-                "Staff ID": staff_id,
-                "Date": now.strftime("%Y-%m-%d"),
-                "Time": now.strftime("%H:%M:%S"),
-                "Type": punch_type,
-                "Latitude": lat,
-                "Longitude": lon,
-                "Photo": photo_filename
-            }
-
-            file_exists = os.path.exists("attendance.xlsx")
-            df = pd.DataFrame([record])
-            df.to_excel("attendance.xlsx", index=False, header=not file_exists, mode='a' if file_exists else 'w')
-
-            st.success(f"✅ {punch_type} recorded successfully!")
-except:
-    st.error("❌ GPS data error. Please reload the page and allow location access.")
+                st.success(f"✅ {option} recorded at {timestamp}")
+else:
+    st.error("❌ You are outside the allowed 100 meter radius from office.")
